@@ -1,0 +1,25 @@
+# Disc images and extracted videos (never commit game data)
+*.iso
+*.bin
+*.cue
+*.mdf
+*.mds
+*.img
+*.pss
+*.PSS
+
+# Local emulator install (contains BIOS dumps)
+PCSX2/
+
+# Per-user runtime files
+settings.json
+scan_cache.csv
+logs/
+*.tmp
+
+# Python
+__pycache__/
+*.pyc
+build/
+dist/
+*.spec
