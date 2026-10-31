@@ -4,7 +4,24 @@ Replaces FMV files in PS2 disc images with the shortest possible blank videos
 to reduce image size. Works as a GUI (run with no arguments) or from the
 command line. Pure Python 3 standard library – no ffmpeg or other tools needed.
 
-## Usage
+## Download (Windows)
+
+Get `PS2VR-<version>-windows-x64.zip` from the [Releases](https://github.com/gw2/PS2VR/releases)
+page and unzip it anywhere. No Python or installer needed.
+
+- **`PS2VR.exe`** – the GUI. Double-click it, or drag a disc image onto it.
+- **`PS2VR-cli.exe`** – the command line. Run it from a terminal with the same commands as below,
+  e.g. `PS2VR-cli.exe batch "D:\PS2" -r`.
+
+Settings, the scan cache and logs are stored next to the exes, so the folder is portable.
+The exes are not code-signed, so Windows SmartScreen may warn the first time you run one. Choose
+"More info" → "Run anyway", or run from source instead.
+
+To build the exes yourself: `python -m pip install pyinstaller`, then `python build_exe.py`.
+
+## Usage (from source)
+
+Requires Python 3.10+.
 
 ```
 python ps2vr.py                         # GUI
