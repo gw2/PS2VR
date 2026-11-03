@@ -2,7 +2,8 @@
 
 A row is reused only when the image's files have the same total size and
 modification time and the scan used the same mode and blank length (both
-change the estimated output size). The cache only holds what the batch list
+change the estimated output size), and was made by the same scanner version
+(SCANNER is bumped whenever detection changes). The cache only holds what the batch list
 displays; processing an image always re-analyses it first.
 """
 
@@ -13,8 +14,11 @@ import time
 
 log = logging.getLogger("ps2vr.cache")
 
-FIELDS = ["path", "size", "mtime_ns", "mode", "duration", "format", "volume_id",
-          "videos", "targets", "target_names", "est_size", "error", "warning", "scanned"]
+SCANNER = "9"   # bump when what a scan records changes, so old rows are rescanned
+
+FIELDS = ["scanner", "path", "size", "mtime_ns", "mode", "duration", "format", "volume_id", "serial",
+          "videos", "targets", "target_names", "est_size", "iso_size", "pad_safe", "pad_suspect",
+          "pad_warning", "error", "warning", "scanned"]
 
 
 def _key(path):
@@ -90,19 +94,24 @@ class ScanCache:
             size, mtime = fingerprint(files)
         except OSError:
             return None
-        if row is None or int(row["size"]) != size or int(row["mtime_ns"]) != mtime or \
-                row["mode"] != mode or abs(float(row["duration"]) - duration) > 1e-6:
+        if row is None or row.get("scanner") != SCANNER or int(row["size"]) != size or \
+                int(row["mtime_ns"]) != mtime or row["mode"] != mode or abs(float(row["duration"]) - duration) > 1e-6:
             self.misses += 1
             log.debug("cache miss: %s", path)
             return None
         self.hits += 1
         log.debug("cache hit: %s (scanned %s)", path, row["scanned"])
         rep = ImageReport(path, files=list(files), size=size, fmt=row["format"],
-                          volume_id=row["volume_id"], error=row["error"],
+                          volume_id=row["volume_id"], serial=row["serial"], mode=mode,
+                          error=row["error"],
                           warning=row["warning"],
                           est_size=int(row["est_size"]) if row["est_size"] else None)
+        rep.iso_size = int(row["iso_size"] or 0)
         rep.video_count = int(row["videos"] or 0)
         rep.target_count = int(row["targets"] or 0)
+        rep.pad_safe = int(row["pad_safe"] or 0)
+        rep.pad_suspect = int(row["pad_suspect"] or 0)
+        rep.pad_warning = row["pad_warning"]
         rep.cached = True
         return rep
 
@@ -112,12 +121,15 @@ class ScanCache:
         except OSError:
             return
         self.rows[_key(rep.path)] = {
-            "path": os.path.abspath(rep.path), "size": size, "mtime_ns": mtime,
+            "scanner": SCANNER, "path": os.path.abspath(rep.path), "size": size, "mtime_ns": mtime,
             "mode": mode, "duration": repr(float(duration)), "format": rep.fmt,
-            "volume_id": rep.volume_id, "videos": rep.video_count,
+            "volume_id": rep.volume_id, "serial": rep.serial, "videos": rep.video_count,
             "targets": rep.target_count,
             "target_names": ";".join(v.path for v in rep.targets),
             "est_size": "" if rep.est_size is None else rep.est_size,
+            "iso_size": rep.iso_size,
+            "pad_safe": rep.pad_safe, "pad_suspect": rep.pad_suspect,
+            "pad_warning": rep.pad_warning,
             "error": rep.error, "warning": rep.warning,
             "scanned": time.strftime("%Y-%m-%d %H:%M:%S"),
         }

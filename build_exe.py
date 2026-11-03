@@ -6,7 +6,7 @@
 Produces in dist/:
     PS2VR.exe       - GUI (no console window)
     PS2VR-cli.exe   - command line (same commands as `python ps2vr.py ...`)
-    PS2VR-<version>-windows-x64.zip  - both exes + README + LICENSE
+    PS2VR-<version>-windows-x64.zip  - both exes + README + CHANGELOG + LICENSE
 """
 
 import os
@@ -57,6 +57,7 @@ def pyinstaller(name, windowed, description, ver):
             "--distpath", DIST, "--workpath", os.path.join(BUILD, name),
             "--specpath", BUILD,
             "--version-file", version_file(ver, name, description),
+            "--add-data", os.path.join(ROOT, "ps2vr", "compat.csv") + os.pathsep + "ps2vr",
             os.path.join(ROOT, "ps2vr.py")]
     print(">", " ".join(args[3:]))
     subprocess.run(args, check=True)
@@ -74,7 +75,7 @@ def main():
     with zipfile.ZipFile(zpath, "w", zipfile.ZIP_DEFLATED) as z:
         for f in ("PS2VR.exe", "PS2VR-cli.exe"):
             z.write(os.path.join(DIST, f), "PS2VR-%s/%s" % (ver, f))
-        for f in ("README.md", "LICENSE"):
+        for f in ("README.md", "CHANGELOG.md", "LICENSE"):
             z.write(os.path.join(ROOT, f), "PS2VR-%s/%s" % (ver, f))
     print("\nBuilt:")
     for f in sorted(os.listdir(DIST)):

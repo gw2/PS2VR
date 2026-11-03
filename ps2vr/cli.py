@@ -7,10 +7,13 @@ import os
 import sys
 import time
 
-from . import __version__, video, rebuild, batch, config
+from . import __version__, compat, video, rebuild, batch, config, padding
+from .batch import _human
 from .cache import ScanCache
-from .disc import DiscImage
+from .disc import DiscImage, SECTOR
 from .fs import FileSystem
+
+logger = logging.getLogger("ps2vr")
 
 
 def _bar(prefix):
@@ -29,44 +32,53 @@ def _bar(prefix):
     return cb
 
 
-def _human(n):
-    for unit in ("B", "KiB", "MiB", "GiB"):
-        if abs(n) < 1024 or unit == "GiB":
-            if unit == "B":
-                return "%d B" % n
-            return ("%.2f %s" if unit == "GiB" else "%.1f %s") % (n, unit)
-        n /= 1024.0
-
-
 def analyze(path):
     with DiscImage(path) as img:
         fs = FileSystem(img)
         vids = video.scan(fs)
-        return img.description, fs, vids
+        pads, unowned = padding.scan(fs, vids)
+        return (img.description, fs, vids, pads, unowned, padding.lba_warning(fs, pads),
+                compat.lookup(compat.serial_of(fs)))
 
 
 def cmd_analyze(a):
-    desc, fs, vids = analyze(a.image)
+    desc, fs, vids, pads, unowned, lba_warning, game = analyze(a.image)
     if a.json:
         print(json.dumps({
             "image": a.image, "format": desc, "volume_id": fs.volume_id,
             "system_id": fs.system_id, "sectors": fs.volume_sectors,
             "udf": fs.udf is not None, "files": len(fs.files),
+            "game": game and {"serial": game.serial, "title": game.title, "region": game.region,
+                              "tested": game.describe()},
             "videos": [{
                 "path": v.path, "format": v.fmt, "status": v.status,
                 "detail": v.detail, "size": v.size, "lba": v.lba,
                 "width": v.width, "height": v.height, "fps": v.fps,
                 "duration": v.duration, "audio": v.audio,
-            } for v in vids]}, indent=2))
+            } for v in vids],
+            "padding": [{
+                "path": p.path, "kind": p.kind, "status": p.status, "lba": p.start,
+                "size": p.size, "fill": p.fill,
+            } for p in pads], "unowned_data": unowned, "padding_warning": lba_warning}, indent=2))
         return 0
     print("Image   : %s" % a.image)
     print("Format  : %s" % desc)
     print("Volume  : %s (%s), %d sectors, %s, %d files" % (
         fs.volume_id, fs.system_id, fs.volume_sectors,
         "ISO9660+UDF" if fs.udf else "ISO9660", len(fs.files)))
+    if game:
+        print("Game    : %s (%s, %s)" % (game.title, game.serial, game.region))
+        if game.describe():
+            print("Tested  : %s" % game.describe())
+            print("          (boot to the intro or menu in PCSX2, not gameplay)")
+    cut = fs.truncated()
+    if cut:
+        print("WARNING : image is truncated - %d file(s) extend past the end (bad dump?); "
+              "it cannot be processed." % len(cut))
+    print_padding(pads, unowned, lba_warning)
     if not vids:
         print("\nNo video files found.")
-        return 1
+        return 0 if pads else 1
     print("\n  #  %-34s %10s  %-12s %s" % ("File", "Size", "Status", "Details"))
     for n, v in enumerate(vids, 1):
         print("%3d  %-34s %10s  %-12s %s%s" % (
@@ -76,6 +88,21 @@ def cmd_analyze(a):
     print("\n%d of %d videos can be replaced (%s reclaimable)." % (
         len(ok), len(vids), _human(sum(v.size for v in ok))))
     return 0
+
+
+def print_padding(pads, unowned, lba_warning):
+    if pads:
+        print("\n     %-34s %10s  %-12s %s" % ("Padding", "Size", "Status", "Details"))
+        for p in pads:
+            print("     %-34s %10s  %-12s %s" % (p.label, _human(p.size), p.status, p.describe()))
+        print("\nPadding: %s removable with --padding, %s more with --padding-suspect." % (
+            _human(sum(p.size for p in pads if p.status == padding.SAFE)),
+            _human(sum(p.size for p in pads if p.status == padding.SUSPECT))))
+    if lba_warning:
+        print("WARNING : %s." % lba_warning)
+    if unowned:
+        print("\nNote: %s of sectors outside any file hold data. The game reads them directly, "
+              "so they are kept." % _human(unowned))
 
 
 def select(vids, names, all_):
@@ -102,51 +129,106 @@ def select(vids, names, all_):
     return chosen
 
 
-def default_output(path):
-    base = os.path.splitext(path)[0]
-    return base + " [PS2VR].iso"
+def default_output(path, vids=(), pads=(), mode="rebuild"):
+    """Named after what is removed. In-place mode leaves blank padding as it is, so
+    only suspects, whose content it does zero, count there."""
+    tag = batch.output_tag(vids, mode == "rebuild" and any(p.status == padding.SAFE for p in pads),
+                           any(p.status == padding.SUSPECT for p in pads))
+    return "%s %s.iso" % (os.path.splitext(path)[0], tag)
 
 
-logger = logging.getLogger("ps2vr")
+def is_default_output(path, out):
+    """Is `out` a name default_output could give, rather than the user's own choice?"""
+    base = os.path.splitext(path)[0] + " "
+    stem, ext = os.path.splitext(out)
+    return (ext.lower() == ".iso" and stem.startswith(base) and
+            batch.OUTPUT_RE.fullmatch(stem[len(base):]) is not None)
+
+
+def _confirmed_plan(image, pads, reps, mode, log, progress):
+    """Read every sector of the items, drop any that turn out not to be blank and
+    plan the removal of the rest. Returns (items, replacements, gaps)."""
+    tick = (lambda: progress(0, 1)) if progress else None   # lets a batch cancel
+    good = []
+    with DiscImage(image) as img:
+        for p in pads:
+            if padding.confirm(img, p, tick):
+                good.append(p)
+            else:
+                log("%s holds data after all - keeping it" % p.label)
+        fs = FileSystem(img)
+        warning = padding.lba_warning(fs, good) if mode == "rebuild" else ""
+        if warning:
+            log("WARNING: %s." % warning)
+        saved = sum(fs.files[k].sectors - (len(d) + SECTOR - 1) // SECTOR for k, d in reps.items())
+        return (good,) + padding.plan_removal(fs, good, saved, mode,
+                                              lambda m: log("WARNING: %s." % m))
 
 
 def run_replace(image, out, vids, duration=1.0, mode="rebuild", verify=True,
-                full_verify=False, log=print, progress=None):
+                full_verify=False, log=print, progress=None, pads=()):
     ui_log = log
 
     def log(m):
         ui_log(m)
         logger.info(m.strip())
+    rebuild.check_output(image, out)
     logger.info("replace: %s -> %s (%d video(s), %s, %.2fs)", image, out, len(vids), mode, duration)
+    if mode == "inplace":
+        pads = [p for p in pads if p.path]   # in-place keeps every sector, so a gap stays
+    if not vids and not pads:
+        raise rebuild.RebuildError("Nothing to do: in-place mode keeps unused sectors")
+    with DiscImage(image) as img:
+        game = compat.lookup(compat.serial_of(FileSystem(img)))
+    for problem in compat.problems(game, mode, vids, pads):
+        log("WARNING: %s." % problem)
     reps = {}
     for v in vids:
         data = video.make_blank(v, duration)
         reps[v.path.upper()] = data
         log("%-34s %10s -> %s" % (v.path, _human(v.size), _human(len(data))))
-    total = rebuild.write(image, out, reps, mode, progress=progress, log=log)
-    log("Output: %s (%s)" % (out, _human(total * 2048)))
-    if verify:
-        log("Verifying output...")
-        errs = rebuild.verify(image, out, reps, full=full_verify, log=log)
-        if errs:
-            for e in errs:
-                log("  FAIL " + e)
-                logger.error("verify: %s", e)
-            raise rebuild.RebuildError("verification failed (%d problems)" % len(errs))
-        log("Verification passed.")
+    gaps = ()
+    if pads:
+        log("Checking %d padding item(s) byte by byte..." % len(pads))
+        pads, pad_reps, gaps = _confirmed_plan(image, pads, reps, mode, log, progress)
+        reps.update(pad_reps)
+        for p in pads:
+            log("%-34s %10s -> %s" % (p.label, _human(p.size),
+                                      "removed" if mode == "rebuild" else "zero-filled"))
+    part = out + ".part"     # a failed run leaves no output and keeps an earlier one
+    try:
+        total = rebuild.write(image, part, reps, mode, progress=progress, log=log, gaps=gaps)
+        if verify:
+            log("Verifying output...")
+            errs = rebuild.verify(image, part, reps, full=full_verify, log=log)
+            if errs:
+                for e in errs:
+                    log("  FAIL " + e)
+                    logger.error("verify: %s", e)
+                raise rebuild.RebuildError("verification failed (%d problems)" % len(errs))
+            log("Verification passed.")
+        os.replace(part, out)
+    except BaseException:
+        if os.path.exists(part):
+            os.remove(part)
+        raise
+    log("Output: %s (%s)" % (out, _human(total * SECTOR)))
     return total
 
 
 def cmd_replace(a):
-    desc, fs, vids = analyze(a.image)
+    if a.output:
+        rebuild.check_output(a.image, a.output)
+    desc, fs, vids, pads, *_ = analyze(a.image)
     chosen = select(vids, a.videos, a.all)
-    if not chosen:
-        raise SystemExit("error: nothing selected (give video numbers/paths or --all)")
-    out = a.output or default_output(a.image)
+    pads = padding.choose(pads, a.padding_suspect) if a.padding or a.padding_suspect else []
+    if not chosen and not pads:
+        raise SystemExit("error: nothing selected (give video numbers/paths, --all or --padding)")
+    out = a.output or default_output(a.image, chosen, pads, a.mode)
     with DiscImage(a.image) as img:
         before = os.path.getsize(img.data_path)
     run_replace(a.image, out, chosen, a.duration, a.mode, not a.no_verify,
-                a.full_verify, progress=_bar("Writing"))
+                a.full_verify, progress=_bar("Writing"), pads=pads)
     after = os.path.getsize(out)
     print("Size: %s -> %s (saved %s)" % (_human(before), _human(after), _human(before - after)))
     return 0
@@ -158,17 +240,25 @@ def print_batch_table(reports):
         if r.error:
             print("%3d  %-46s %10s %10s %10s  error: %s" % (n, r.name[:46], _human(r.size), "-", "-", r.error))
             continue
-        after = _human(r.est_size) if r.est_size is not None else "-"
-        print("%3d  %-46s %10s %10s %10s  %d of %d replaceable%s" % (
+        after = _human(r.after_size) if r.after_size is not None else "-"
+        print("%3d  %-46s %10s %10s %10s  %s" % (
             n, r.name[:46], _human(r.size), after,
             _human(r.savings) if r.can_process else "-",
-            r.target_count, r.video_count, ("  (" + r.warning + ")") if r.warning else ""))
+            r.contents))
     ok = [r for r in reports if r.can_process]
-    print("\n%d image(s) found, %d with replaceable videos; total savings %s." % (
+    print("\n%d image(s) found, %d can be processed; total savings %s." % (
         len(reports), len(ok), _human(sum(r.savings for r in ok))))
+    if not any(r.use_padding for r in reports):
+        print("Blank padding across these images: %s (add --padding to remove it)." %
+              _human(sum(r.pad_safe for r in reports if not r.error)))
 
 
 def cmd_batch(a):
+    a.padding = a.padding or a.padding_only
+    if a.padding and a.mode != "rebuild":
+        raise SystemExit("error: --padding and --padding-only need rebuild mode "
+                         "(in-place cannot shrink the image)")
+
     def scanned(n, total, rep):
         sys.stderr.write("\rScanning %d/%d" % (n, total))
         sys.stderr.flush()
@@ -180,6 +270,8 @@ def cmd_batch(a):
             cache.rows = {}
     reports = batch.scan_folder(a.folder, a.recursive, a.duration, a.mode,
                                 a.include_outputs, on_image=scanned, cache=cache)
+    for r in reports:
+        r.use_padding, r.padding_only = a.padding, a.padding_only
     sys.stderr.write("\r" + " " * 30 + "\r")
     if not reports:
         print("No disc images found in %s" % a.folder)
@@ -197,7 +289,7 @@ def cmd_batch(a):
                 raise SystemExit("error: '%s' is not an image number from the list" % n)
             r = reports[int(n) - 1]
             if not r.can_process:
-                raise SystemExit("error: %s has nothing to replace" % r.name)
+                raise SystemExit("error: %s has nothing to process" % r.name)
             chosen.append(r)
     if a.output_dir:
         os.makedirs(a.output_dir, exist_ok=True)
@@ -219,6 +311,7 @@ def cmd_blank(a):
         vids = video.scan(fs)
         v = select(vids, [a.video], False)[0]
         data = video.make_blank(v, a.duration)
+    rebuild.check_output(a.image, a.output)
     with open(a.output, "wb") as f:
         f.write(data)
     print("Wrote %s (%s) modelled on %s" % (a.output, _human(len(data)), v.path))
@@ -233,6 +326,7 @@ def cmd_extract(a):
         if ent is None:
             raise SystemExit("error: %s not found" % a.path)
         out = a.output or ent.name
+        rebuild.check_output(a.image, out)
         with open(out, "wb") as f:
             pos = 0
             while pos < ent.size:
@@ -247,23 +341,24 @@ def build_parser():
     p = argparse.ArgumentParser(
         prog="ps2vr",
         description="PS2VR - PlayStation 2 Video Replacer. Replaces FMV files in PS2 "
-                    "disc images with minimal blank videos to shrink the image. "
+                    "disc images with minimal blank videos and removes padding to "
+                    "shrink the image. "
                     "Run without arguments to open the GUI.")
     p.add_argument("--version", action="version", version="PS2VR " + __version__)
     p.add_argument("--log-level", choices=config.LOG_LEVELS,
                    help="override the log level from settings.json for this run")
     sub = p.add_subparsers(dest="cmd")
 
-    s = sub.add_parser("analyze", aliases=["list"], help="list videos on a disc image")
+    s = sub.add_parser("analyze", aliases=["list"], help="list videos and padding on a disc image")
     s.add_argument("image", help="ISO / BIN / CUE / MDF / MDS")
     s.add_argument("--json", action="store_true", help="machine readable output")
     s.set_defaults(func=cmd_analyze)
 
-    s = sub.add_parser("replace", help="replace videos and write a new ISO")
+    s = sub.add_parser("replace", help="replace videos and/or remove padding, writing a new ISO")
     s.add_argument("image")
     s.add_argument("videos", nargs="*", help="video numbers (from analyze) or paths")
     s.add_argument("--all", action="store_true", help="replace every compatible video")
-    s.add_argument("-o", "--output", help="output ISO (default: '<name> [PS2VR].iso')")
+    s.add_argument("-o", "--output", help="output ISO (default: '<name> [PS2VR-VP].iso': V videos, P padding, S suspects)")
     s.add_argument("--mode", choices=["rebuild", "inplace"], default="rebuild",
                    help="rebuild: shrink the ISO by moving later files (default); "
                         "inplace: keep all LBAs, zero-fill freed space")
@@ -272,19 +367,28 @@ def build_parser():
     s.add_argument("--no-verify", action="store_true", help="skip output verification")
     s.add_argument("--full-verify", action="store_true",
                    help="CRC-compare every file instead of sampling")
+    s.add_argument("--padding", action="store_true",
+                   help="also remove blank padding: unused sectors and blank files with filler names")
+    s.add_argument("--padding-suspect", action="store_true",
+                   help="also remove files that only look like padding (implies --padding; "
+                        "test the result: the game may read them)")
     s.set_defaults(func=cmd_replace)
 
     s = sub.add_parser("batch", help="scan a folder of images; optionally process them")
     s.add_argument("folder")
     s.add_argument("images", nargs="*", help="image numbers (from the scan list) to process")
-    s.add_argument("--all", action="store_true", help="process every image with replaceable videos")
+    s.add_argument("--all", action="store_true", help="process every image that has something to remove")
     s.add_argument("-r", "--recursive", action="store_true", help="include subfolders")
     s.add_argument("-o", "--output-dir", help="where to write ISOs (default: next to each image)")
     s.add_argument("--mode", choices=["rebuild", "inplace"], default="rebuild")
     s.add_argument("--duration", type=float, default=1.0)
-    s.add_argument("--overwrite", action="store_true", help="replace existing [PS2VR] outputs")
+    s.add_argument("--overwrite", action="store_true", help="replace an earlier output of the same name")
+    s.add_argument("--padding", action="store_true",
+                   help="also remove blank padding: unused sectors and blank files with filler names")
+    s.add_argument("--padding-only", action="store_true",
+                   help="remove blank padding and keep every video (implies --padding; rebuild mode)")
     s.add_argument("--include-outputs", action="store_true",
-                   help="also list images already named [PS2VR]")
+                   help="also list images already named [PS2VR...]")
     s.add_argument("--no-verify", action="store_true")
     s.add_argument("--rescan", action="store_true",
                    help="ignore cached scan results (the cache is refreshed)")

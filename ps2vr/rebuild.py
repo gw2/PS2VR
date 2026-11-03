@@ -40,10 +40,23 @@ class _Region:
         self.start = ent.lba
         self.old = ent.sectors
         self.new = (len(data) + SECTOR - 1) // SECTOR
+        self.name = ent.path
 
     @property
     def end(self):
         return self.start + self.old
+
+
+class _Gap(_Region):
+    """Sectors no file owns, removed outright."""
+
+    def __init__(self, start, sectors):
+        self.ent = None
+        self.data = b""
+        self.start = start
+        self.old = sectors
+        self.new = 0
+        self.name = "unused sectors at %d" % start
 
 
 def _mapper(regions):
@@ -62,9 +75,10 @@ def _mapper(regions):
     return new_lba
 
 
-def plan(fs, replacements, mode):
-    """Validate replacements; return (regions, new_total_sectors)."""
-    regions = []
+def plan(fs, replacements, mode, gaps=()):
+    """Validate replacements; return (regions, new_total_sectors). `gaps` are
+    (start, sectors) extents that no file owns, to drop in rebuild mode."""
+    regions = [_Gap(*g) for g in gaps] if mode == "rebuild" else []
     for key, data in replacements.items():
         ent = fs.files.get(key.upper())
         if ent is None:
@@ -76,32 +90,55 @@ def plan(fs, replacements, mode):
     regions.sort(key=lambda r: r.start)
     for a, b in zip(regions, regions[1:]):
         if b.start < a.end:
-            raise RebuildError("Overlapping extents: %s / %s" % (a.ent.path, b.ent.path))
+            raise RebuildError("Overlapping extents: %s / %s" % (a.name, b.name))
     # extents shared with other files would be corrupted
     for ent in fs.files.values():
         for r in regions:
             if ent is not r.ent and ent.size and ent.lba < r.end and ent.lba + ent.sectors > r.start:
-                raise RebuildError("%s shares sectors with %s" % (ent.path, r.ent.path))
+                raise RebuildError("%s shares sectors with %s" % (ent.path, r.name))
     total = fs.img.num_sectors
     if mode == "rebuild":
         meta_end = fs.metadata_end()
         logger.debug("metadata ends at sector %d", meta_end)
         if regions and regions[0].start < meta_end:
             raise RebuildError(
-                "File-system metadata is located after %s; use in-place mode" % regions[0].ent.path)
+                "File-system metadata is located after %s; use in-place mode" % regions[0].name)
+        # dual layer: layer 1 has its own file system with layer-relative
+        # addresses, so it can only move as a whole block
+        lb = fs.layer_break
+        if lb is not None and regions and regions[-1].end > lb:
+            raise RebuildError("%s is on the second layer of a dual-layer disc; use in-place mode"
+                               % regions[-1].name)
         total += sum(r.new - r.old for r in regions)
     for r in regions:
-        logger.debug("region %s: lba %d, %d -> %d sectors", r.ent.path, r.start, r.old, r.new)
+        logger.debug("region %s: lba %d, %d -> %d sectors", r.name, r.start, r.old, r.new)
     return regions, total
 
 
-def write(src_path, out_path, replacements, mode="rebuild", progress=None, log=print):
-    if os.path.abspath(src_path) == os.path.abspath(out_path):
-        raise RebuildError("Output must be a different file from the input")
+def check_output(src_path, out_path):
+    """Refuse an output that is any file of the source image, such as a CUE's BIN,
+    under whatever name it is reached: other case, short name, link, mapped drive."""
+    from .batch import image_files  # late import: batch imports this module
+
+    def name(p):
+        return os.path.normcase(os.path.realpath(p))
+    for f in image_files(src_path):
+        if name(f) == name(out_path) or (os.path.exists(f) and os.path.exists(out_path)
+                                         and os.path.samefile(f, out_path)):
+            raise RebuildError("Refusing to write over the source image: %s is %s"
+                               % (out_path, f))
+
+
+def write(src_path, out_path, replacements, mode="rebuild", progress=None, log=print, gaps=()):
+    check_output(src_path, out_path)
     img = DiscImage(src_path)
     try:
         fs = FileSystem(img)
-        regions, total = plan(fs, replacements, mode)
+        cut = fs.truncated()
+        if cut:
+            raise RebuildError("Image is truncated: %d file(s) extend past the end of the image "
+                               "(e.g. %s)" % (len(cut), cut[0].path))
+        regions, total = plan(fs, replacements, mode, gaps)
         free = shutil.disk_usage(os.path.dirname(os.path.abspath(out_path)) or ".").free
         if free < total * SECTOR + (64 << 20):
             raise RebuildError("Not enough disk space for output (%d MiB needed)" % (total * SECTOR >> 20))
@@ -148,7 +185,7 @@ def _put(out, sector, buf):
 
 
 def _patch(out, fs, regions, new_lba, total, mode, log):
-    sizes = {r.ent.path.upper(): len(r.data) for r in regions}
+    sizes = {r.ent.path.upper(): len(r.data) for r in regions if r.ent}
     delta = total - fs.img.num_sectors
 
     # ---- ISO9660 ------------------------------------------------------------
@@ -169,7 +206,7 @@ def _patch(out, fs, regions, new_lba, total, mode, log):
     cache = {}
     for key, ent in fs.files.items():
         new_size = sizes.get(key)
-        nl = new_lba(ent.lba) if ent.size else ent.lba
+        nl = new_lba(ent.lba)
         if nl == ent.lba and new_size is None:
             continue
         for ref in ent.iso_refs:
@@ -208,8 +245,6 @@ def _patch(out, fs, regions, new_lba, total, mode, log):
             o = ad_off + k * step
             ln_raw, pos = struct.unpack("<II", fe[o:o + 8])
             ln = ln_raw & 0x3FFFFFFF
-            if ln == 0:
-                continue
             npos = new_lba(ps + pos) - ps
             if npos != pos:
                 fe[o + 4:o + 8] = struct.pack("<I", npos)
@@ -286,7 +321,20 @@ def verify(src_path, out_path, replacements, full=False, progress=None, log=prin
                 info_len, exts, *_ = fb.udf_file_extents(eb.udf_fe)
                 if exts and (info_len != eb.size or fb.udf.part_start + exts[0][0] != eb.lba):
                     errors.append("UDF entry inconsistent: " + key)
-        if fb.volume_sectors != b.num_sectors:
+        la, lb = fa.layer_break, fb.layer_break
+        if la is not None:
+            # dual layer: layer 1 must follow the shrunken layer 0 unchanged
+            if lb is None:
+                errors.append("layer 1 volume descriptor not found at sector %d" % fb.volume_sectors)
+            elif a.num_sectors - la != b.num_sectors - lb:
+                errors.append("layer 1 size changed")
+            else:
+                n = a.num_sectors - la
+                # (the last sector is the UDF end anchor, rewritten with its new location)
+                for off in sorted({0, 16, 17, n // 2, n - 2}):
+                    if off < n and a.read(la + off) != b.read(lb + off):
+                        errors.append("layer 1 sector %d differs" % off)
+        elif fb.volume_sectors != b.num_sectors:
             errors.append("volume size %d != image sectors %d" % (fb.volume_sectors, b.num_sectors))
     return errors
 

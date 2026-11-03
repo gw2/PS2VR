@@ -255,6 +255,20 @@ class FileSystem:
         size = ent.size - offset if size is None else min(size, ent.size - offset)
         return self.img.read_bytes(ent.lba, max(0, size), offset)
 
+    @property
+    def layer_break(self):
+        """Dual-layer DVD: first sector of layer 1 (where its own PVD sits, right
+        after the volume described by this PVD), else None."""
+        vs = self.volume_sectors
+        if vs < self.img.num_sectors and self.img.read(vs)[:6] == b"\x01CD001":
+            return vs
+        return None
+
+    def truncated(self):
+        """Files whose data lies beyond the end of the image (a cut-off dump)."""
+        n = self.img.num_sectors
+        return [e for e in self.files.values() if e.size and e.lba + e.sectors > n]
+
     def metadata_end(self):
         """Highest sector (exclusive) used by directories / UDF descriptors."""
         end = 0
