@@ -6,7 +6,7 @@ import os
 import re
 
 from . import compat, video, rebuild, padding
-from .disc import DiscImage, SECTOR
+from .disc import DiscImage, SECTOR, cue_files
 from .fs import FileSystem
 
 IMAGE_EXTS = {".iso", ".cue", ".bin", ".mdf", ".mds", ".img"}
@@ -108,18 +108,11 @@ class ImageReport:
         return text
 
 
-def _cue_files(path):
-    folder = os.path.dirname(os.path.abspath(path))
-    with open(path, "r", errors="replace") as f:
-        names = re.findall(r'^\s*FILE\s+"?(.+?)"?\s+\w+\s*$', f.read(), re.M | re.I)
-    return [os.path.join(folder, n) for n in names]
-
-
 def image_files(path):
     """All files on disk that make up the image at `path`."""
     ext = os.path.splitext(path)[1].lower()
     if ext == ".cue":
-        return [path] + [p for p in _cue_files(path) if os.path.exists(p)]
+        return [path] + [p for p in cue_files(path) if os.path.exists(p)]
     if ext == ".mds":
         base = os.path.splitext(path)[0]
         return [path] + [p for p in (base + ".mdf", base + ".MDF") if os.path.exists(p)][:1]
@@ -216,7 +209,7 @@ def scan_folder(folder, recursive=False, duration=1.0, mode="rebuild",
                     rep = None
             if rep is None:
                 rep = estimate(p, duration, mode)
-                if cache is not None:
+                if cache is not None and not rep.error:    # an error may be a passing one
                     cache.put(rep, mode, duration)
             reports.append(rep)
             if on_image:
@@ -248,6 +241,7 @@ def run(reports, out_dir=None, duration=1.0, mode="rebuild", verify=True,
     """Process each report in turn. progress(image_index, image_count, fraction)."""
     from .cli import run_replace  # late import: cli imports this module
     results = []
+    used = set()
     todo = [r for r in reports if r.can_process]
     for i, rep in enumerate(todo):
         if cancel and cancel():
@@ -255,6 +249,12 @@ def run(reports, out_dir=None, duration=1.0, mode="rebuild", verify=True,
             break
         out = output_path(rep, out_dir)
         log("[%d/%d] %s" % (i + 1, len(todo), rep.name))
+        key = os.path.normcase(os.path.abspath(out))
+        if key in used:
+            log("  skipped: another image in this batch also gives %s" % os.path.basename(out))
+            results.append(BatchResult(rep, out, False, "same output name as another image"))
+            continue
+        used.add(key)
         if os.path.exists(out) and not overwrite:
             log("  skipped: %s already exists" % os.path.basename(out))
             results.append(BatchResult(rep, out, False, "output exists"))

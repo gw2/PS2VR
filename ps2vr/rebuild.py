@@ -97,7 +97,13 @@ def plan(fs, replacements, mode, gaps=()):
             if ent is not r.ent and ent.size and ent.lba < r.end and ent.lba + ent.sectors > r.start:
                 raise RebuildError("%s shares sectors with %s" % (ent.path, r.name))
     total = fs.img.num_sectors
+    for r in regions:
+        if r.ent and r.ent.path.upper() in fs.split_files:
+            raise RebuildError("%s has several extents, which is not supported" % r.name)
     if mode == "rebuild":
+        if fs.split_files and regions:
+            raise RebuildError("%s has several extents and cannot be moved; use in-place mode"
+                               % sorted(fs.split_files)[0])
         meta_end = fs.metadata_end()
         logger.debug("metadata ends at sector %d", meta_end)
         if regions and regions[0].start < meta_end:
@@ -255,8 +261,12 @@ def _patch(out, fs, regions, new_lba, total, mode, log):
                 fe[o:o + 4] = struct.pack("<I", (ln_raw & 0xC0000000) | use)
                 changed = True
         if new_size is not None:
+            blocks = (new_size + SECTOR - 1) // SECTOR
             fe[56:64] = struct.pack("<Q", new_size)
-            fe[64:72] = struct.pack("<Q", (new_size + SECTOR - 1) // SECTOR)
+            if tag == 266:     # Extended File Entry: object size comes first
+                fe[64:80] = struct.pack("<QQ", new_size, blocks)
+            else:
+                fe[64:72] = struct.pack("<Q", blocks)
         if changed or new_size is not None:
             udf_fix_tag(fe)
             _put(out, fe_abs, fe)
@@ -291,8 +301,11 @@ def _patch(out, fs, regions, new_lba, total, mode, log):
 def verify(src_path, out_path, replacements, full=False, progress=None, log=print):
     """Re-open the output and check every file against the source."""
     errors = []
+    replaced = {k.upper(): d for k, d in replacements.items()}
     with DiscImage(src_path) as a, DiscImage(out_path) as b:
         fa, fb = FileSystem(a), FileSystem(b)
+        if (fa.udf is None) != (fb.udf is None):
+            errors.append("UDF file system %s" % ("lost" if fa.udf else "appeared"))
         keys = sorted(fa.files)
         for n, key in enumerate(keys):
             if progress:
@@ -301,9 +314,8 @@ def verify(src_path, out_path, replacements, full=False, progress=None, log=prin
             if eb is None:
                 errors.append("missing: " + key)
                 continue
-            if key in {k.upper() for k in replacements}:
-                want = replacements[next(k for k in replacements if k.upper() == key)]
-                if fb.read_file(eb) != want:
+            if key in replaced:
+                if fb.read_file(eb) != replaced[key]:
                     errors.append("replacement mismatch: " + key)
                 continue
             if ea.size != eb.size:

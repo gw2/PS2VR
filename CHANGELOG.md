@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.2.1 – 2026-11-03
+
+### Security
+- `extract` without `-o` no longer lets a file name on a crafted disc write outside the current folder, and no longer replaces an existing file.
+
+### Fixed
+- A failed run could delete the source image if the source was named like the temporary output (`<output>.part`).
+- Verification now fails when the output's UDF file system can no longer be read.
+- Rebuild mode no longer moves discs with UDF structures after the files it removes, or files with several extents. It refuses them, which avoids a corrupt output.
+- If all of the selected padding turns out to hold data, the job stops instead of writing an unchanged copy.
+- Two batch images with the same output name no longer overwrite each other.
+- Closing the GUI during a job now asks first, stops the job and removes its partial output. Browsing during a job no longer clears the list or undoes Cancel.
+- `batch --rescan` no longer forgets the scan results of other folders, scan errors are no longer cached, and a damaged cache row is ignored.
+- A missing log folder, a bad window size or a damaged settings file or list no longer stops the program from starting.
+- `--duration` is limited to 0-600 seconds, and the GUI's blank length to 600 seconds.
+
 ## 0.2.0 – 2026-11-03
 
 ### New

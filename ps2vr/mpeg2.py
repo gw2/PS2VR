@@ -10,7 +10,6 @@ Only the pieces of the bitstream syntax we actually emit are implemented.
 """
 
 from dataclasses import dataclass
-import struct
 
 
 class BitWriter:

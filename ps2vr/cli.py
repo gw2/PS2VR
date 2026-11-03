@@ -3,13 +3,15 @@
 import argparse
 import json
 import logging
+import math
 import os
+import re
 import sys
 import time
 
 from . import __version__, compat, video, rebuild, batch, config, padding
 from .batch import _human
-from .cache import ScanCache
+from .cache import ScanCache, WriteOnlyCache
 from .disc import DiscImage, SECTOR
 from .fs import FileSystem
 
@@ -195,7 +197,10 @@ def run_replace(image, out, vids, duration=1.0, mode="rebuild", verify=True,
         for p in pads:
             log("%-34s %10s -> %s" % (p.label, _human(p.size),
                                       "removed" if mode == "rebuild" else "zero-filled"))
+    if not reps and not gaps:
+        raise rebuild.RebuildError("Nothing to do: all of the padding holds data after all")
     part = out + ".part"     # a failed run leaves no output and keeps an earlier one
+    rebuild.check_output(image, part)
     try:
         total = rebuild.write(image, part, reps, mode, progress=progress, log=log, gaps=gaps)
         if verify:
@@ -267,7 +272,7 @@ def cmd_batch(a):
     if settings["cache_enabled"] and not a.no_cache:
         cache = ScanCache(settings.cache_path)
         if a.rescan:
-            cache.rows = {}
+            cache = WriteOnlyCache(cache)
     reports = batch.scan_folder(a.folder, a.recursive, a.duration, a.mode,
                                 a.include_outputs, on_image=scanned, cache=cache)
     for r in reports:
@@ -318,6 +323,14 @@ def cmd_blank(a):
     return 0
 
 
+def _safe_name(name):
+    """A file name read from a disc, without anything that could leave the folder."""
+    name = re.split(r"[\\/:]", name)[-1]
+    if name in ("", ".", ".."):
+        raise SystemExit("error: the disc gives this file an unusable name; choose one with -o")
+    return name
+
+
 def cmd_extract(a):
     with DiscImage(a.image) as img:
         fs = FileSystem(img)
@@ -325,7 +338,9 @@ def cmd_extract(a):
         ent = fs.files.get(key)
         if ent is None:
             raise SystemExit("error: %s not found" % a.path)
-        out = a.output or ent.name
+        out = a.output or _safe_name(ent.name)
+        if not a.output and os.path.exists(out):
+            raise SystemExit("error: %s already exists; choose a name with -o" % out)
         rebuild.check_output(a.image, out)
         with open(out, "wb") as f:
             pos = 0
@@ -335,6 +350,13 @@ def cmd_extract(a):
                 pos += n
     print("Extracted %s -> %s" % (ent.path, out))
     return 0
+
+
+def _duration(text):
+    d = float(text)
+    if not math.isfinite(d) or not 0 <= d <= video.MAX_DURATION:
+        raise argparse.ArgumentTypeError("must be between 0 and %d seconds" % video.MAX_DURATION)
+    return d
 
 
 def build_parser():
@@ -362,7 +384,7 @@ def build_parser():
     s.add_argument("--mode", choices=["rebuild", "inplace"], default="rebuild",
                    help="rebuild: shrink the ISO by moving later files (default); "
                         "inplace: keep all LBAs, zero-fill freed space")
-    s.add_argument("--duration", type=float, default=1.0,
+    s.add_argument("--duration", type=_duration, default=1.0,
                    help="length of the blank video in seconds (default 1.0, min 1 frame)")
     s.add_argument("--no-verify", action="store_true", help="skip output verification")
     s.add_argument("--full-verify", action="store_true",
@@ -381,7 +403,7 @@ def build_parser():
     s.add_argument("-r", "--recursive", action="store_true", help="include subfolders")
     s.add_argument("-o", "--output-dir", help="where to write ISOs (default: next to each image)")
     s.add_argument("--mode", choices=["rebuild", "inplace"], default="rebuild")
-    s.add_argument("--duration", type=float, default=1.0)
+    s.add_argument("--duration", type=_duration, default=1.0)
     s.add_argument("--overwrite", action="store_true", help="replace an earlier output of the same name")
     s.add_argument("--padding", action="store_true",
                    help="also remove blank padding: unused sectors and blank files with filler names")
@@ -399,7 +421,7 @@ def build_parser():
     s.add_argument("image")
     s.add_argument("video")
     s.add_argument("-o", "--output", required=True)
-    s.add_argument("--duration", type=float, default=1.0)
+    s.add_argument("--duration", type=_duration, default=1.0)
     s.set_defaults(func=cmd_blank)
 
     s = sub.add_parser("extract", help="extract a file from the image")

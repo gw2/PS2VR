@@ -94,24 +94,29 @@ class ScanCache:
             size, mtime = fingerprint(files)
         except OSError:
             return None
-        if row is None or row.get("scanner") != SCANNER or int(row["size"]) != size or \
-                int(row["mtime_ns"]) != mtime or row["mode"] != mode or abs(float(row["duration"]) - duration) > 1e-6:
+        try:
+            if row is None or row.get("scanner") != SCANNER or int(row["size"]) != size or \
+                    int(row["mtime_ns"]) != mtime or row["mode"] != mode or abs(float(row["duration"]) - duration) > 1e-6:
+                self.misses += 1
+                log.debug("cache miss: %s", path)
+                return None
+            rep = ImageReport(path, files=list(files), size=size, fmt=row["format"],
+                              volume_id=row["volume_id"], serial=row["serial"], mode=mode,
+                              error=row["error"],
+                              warning=row["warning"],
+                              est_size=int(row["est_size"]) if row["est_size"] else None)
+            rep.iso_size = int(row["iso_size"] or 0)
+            rep.video_count = int(row["videos"] or 0)
+            rep.target_count = int(row["targets"] or 0)
+            rep.pad_safe = int(row["pad_safe"] or 0)
+            rep.pad_suspect = int(row["pad_suspect"] or 0)
+            rep.pad_warning = row["pad_warning"]
+        except (KeyError, TypeError, ValueError) as e:
             self.misses += 1
-            log.debug("cache miss: %s", path)
+            log.warning("ignoring damaged cache row for %s: %s", path, e)
             return None
         self.hits += 1
         log.debug("cache hit: %s (scanned %s)", path, row["scanned"])
-        rep = ImageReport(path, files=list(files), size=size, fmt=row["format"],
-                          volume_id=row["volume_id"], serial=row["serial"], mode=mode,
-                          error=row["error"],
-                          warning=row["warning"],
-                          est_size=int(row["est_size"]) if row["est_size"] else None)
-        rep.iso_size = int(row["iso_size"] or 0)
-        rep.video_count = int(row["videos"] or 0)
-        rep.target_count = int(row["targets"] or 0)
-        rep.pad_safe = int(row["pad_safe"] or 0)
-        rep.pad_suspect = int(row["pad_suspect"] or 0)
-        rep.pad_warning = row["pad_warning"]
         rep.cached = True
         return rep
 
@@ -134,3 +139,28 @@ class ScanCache:
             "scanned": time.strftime("%Y-%m-%d %H:%M:%S"),
         }
         self.dirty = True
+
+
+class WriteOnlyCache:
+    """For a forced rescan: never returns hits but stores fresh results."""
+
+    def __init__(self, cache):
+        self.cache = cache
+
+    def get(self, *a):
+        self.cache.misses += 1
+        return None
+
+    def put(self, *a):
+        self.cache.put(*a)
+
+    def save(self):
+        self.cache.save()
+
+    @property
+    def hits(self):
+        return self.cache.hits
+
+    @property
+    def misses(self):
+        return self.cache.misses

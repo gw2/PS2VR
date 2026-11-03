@@ -10,9 +10,9 @@ from dataclasses import dataclass, field
 import logging
 import struct
 
-log = logging.getLogger("ps2vr.fs")
+from .disc import SECTOR
 
-SECTOR = 2048
+log = logging.getLogger("ps2vr.fs")
 
 
 @dataclass
@@ -43,6 +43,7 @@ class FileSystem:
     def __init__(self, img):
         self.img = img
         self.files = {}          # path (upper case, no ;1) -> FileEntry
+        self.split_files = set()  # keys of files with several extents (only the first is listed)
         self.dirs = {}           # path -> FileEntry
         self.pvd_sector = 16
         self.volume_sectors = 0
@@ -122,6 +123,8 @@ class FileSystem:
                     if ent is None:
                         ent = FileEntry(full, elba, esize)
                         self.files[key] = ent
+                    if flags & 0x80 or elba != ent.lba:
+                        self.split_files.add(key)
                     ent.iso_refs.append(ref)
 
     # -------------------------------------------------------------------- UDF
@@ -218,8 +221,6 @@ class FileSystem:
                 data += self.img.read(self.udf.part_start + pos, (ln + SECTOR - 1) // SECTOR)[:ln]
             data = bytes(data[:info_len])
         self.udf.dir_fes.append(fe_abs)
-        if path == "/":
-            self.udf.root_fe = fe_abs
         i = 0
         while i + 38 <= len(data):
             if struct.unpack("<H", data[i:i + 2])[0] != 257:
@@ -280,6 +281,10 @@ class FileSystem:
             for ent in self.files.values():
                 if ent.udf_fe is not None:
                     end = max(end, ent.udf_fe + 1)
+            for _, s in self.udf.orphans:
+                end = max(end, s + 1)
+            for s in self.udf.pd_sectors + self.udf.lvd_sectors:
+                end = max(end, s + 1)
             if self.udf.lvid_sector:
                 end = max(end, self.udf.lvid_sector + 1)
         end = max(end, self.path_tables[1] + 1, self.path_tables[2] + 1)
@@ -295,7 +300,6 @@ class UdfInfo:
     part_start: int = None
     part_len: int = None
     fsd_lb: int = 0
-    root_fe: int = None
     dir_fes: list = field(default_factory=list)
     orphans: list = field(default_factory=list)
 

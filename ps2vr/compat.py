@@ -63,7 +63,7 @@ def lookup(serial):
     if _games is None:
         try:
             _games = load()
-        except OSError as e:
+        except (OSError, TypeError, ValueError) as e:
             log.warning("no compatibility list: %s", e)
             _games = {}
     return _games.get(serial)
