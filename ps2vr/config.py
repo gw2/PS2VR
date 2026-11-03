@@ -28,6 +28,8 @@ DEFAULTS = {
     "batch_output_dir": "",
     "batch_overwrite": False,
     "batch_sort": "",       # "<column>:asc|desc" of the batch table
+    "batch_padding": False,
+    "batch_padding_only": False,
     "last_tab": 0,
     "window_geometry": "960x680",
     # processing defaults (shared by both tabs)

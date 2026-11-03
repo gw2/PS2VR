@@ -7,7 +7,7 @@ import threading
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
-from . import __version__, cli, batch, config
+from . import __version__, cli, batch, config, padding, rebuild
 from .cache import ScanCache
 
 logger = logging.getLogger("ps2vr.gui")
@@ -169,8 +169,8 @@ class _Tab(ttk.Frame):
         self.log.grid(row=row + 1, column=0, columnspan=4, sticky="nsew")
 
 
-class App(_Tab):
-    """Single image tab."""
+class SingleTab(_Tab):
+    """Open one image, choose what to remove, write the output."""
 
     def __init__(self, parent, ctx, image=None):
         super().__init__(parent, ctx)
@@ -184,7 +184,9 @@ class App(_Tab):
         self.image_var = tk.StringVar(value=image or remembered)
         self.out_var = tk.StringVar(value="" if image else self.settings["single_output"])
         self._out_for = None if image else remembered   # image the output path belongs to
+        self._analyzed = None                           # image self.vids belongs to
         self.info_var = tk.StringVar(value="Open a PS2 disc image (ISO, BIN/CUE, MDF/MDS).")
+        self.mode_var.trace_add("write", self._name_output)
 
         ttk.Label(self, text="Disc image:").grid(row=0, column=0, sticky="w")
         ttk.Entry(self, textvariable=self.image_var).grid(row=0, column=1, sticky="ew", padx=5)
@@ -199,6 +201,7 @@ class App(_Tab):
         sel.grid(row=2, column=0, columnspan=4, sticky="w")
         ttk.Button(sel, text="Select all compatible", command=self.select_all).pack(side="left")
         ttk.Button(sel, text="Select none", command=self.select_none).pack(side="left", padx=5)
+        ttk.Button(sel, text="Select blank padding", command=self.select_padding).pack(side="left")
 
         self.tree = self.make_tree(3, (
             ("sel", "", 32, "center", False), ("file", "File", 260, "w", True),
@@ -212,7 +215,7 @@ class App(_Tab):
         ttk.Label(self, text="Output ISO:").grid(row=5, column=0, sticky="w")
         ttk.Entry(self, textvariable=self.out_var).grid(row=5, column=1, sticky="ew", padx=5)
         ttk.Button(self, text="Browse...", command=self.browse_out).grid(row=5, column=2)
-        self.go_btn = ttk.Button(self, text="Replace videos", command=self.replace)
+        self.go_btn = ttk.Button(self, text="Write ISO", command=self.replace)
         self.go_btn.grid(row=5, column=3, padx=(5, 0))
 
         self.make_log(6)
@@ -246,18 +249,21 @@ class App(_Tab):
             self.out_var.set(cli.default_output(path))
             self._out_for = path
         self.tree.delete(*self.tree.get_children())
+        self.vids, self.checked, self._analyzed = [], set(), None
         self.write_log("Analyzing %s ..." % path)
 
         def work():
-            desc, fs, vids = cli.analyze(path)
+            desc, fs, vids, pads, unowned, lba_warning, game = cli.analyze(path)
 
             def show():
-                self.vids = vids
+                self.vids = vids + pads     # padding is listed but only removed when ticked
+                self._analyzed = path
                 self.checked = {i for i, v in enumerate(vids) if v.compatible}
-                for i, v in enumerate(vids):
+                self._name_output()
+                for i, v in enumerate(self.vids):
                     self.tree.insert("", "end", iid=str(i), values=(
                         CHECK if i in self.checked else (UNCHECK if v.compatible else NA),
-                        v.path, cli._human(v.size), v.status,
+                        getattr(v, "label", v.path), cli._human(v.size), v.status,
                         v.describe() + ((" - " + v.detail) if v.detail else "")),
                         tags=() if v.compatible else ("bad",))
                 self.apply_sort()
@@ -266,7 +272,26 @@ class App(_Tab):
                     fs.volume_id or "(no label)", desc,
                     "ISO9660+UDF" if fs.udf else "ISO9660", len(fs.files),
                     len(vids), len(ok), cli._human(sum(v.size for v in ok))))
+                if game:
+                    self.write_log("Game: %s (%s, %s)" % (game.title, game.serial, game.region))
+                    if game.describe():
+                        self.write_log("Tested in PCSX2, to the intro or menu only: %s"
+                                       % game.describe())
                 self.write_log("Found %d video(s); %d compatible." % (len(vids), len(ok)))
+                if pads:
+                    self.write_log("Found padding: %s blank, %s suspect. Tick the rows to remove "
+                                   "them, then test the output: a suspect may be read by the game." % (
+                                       cli._human(sum(p.size for p in pads if p.status == padding.SAFE)),
+                                       cli._human(sum(p.size for p in pads if p.status == padding.SUSPECT))))
+                if lba_warning:
+                    self.write_log("WARNING: %s." % lba_warning)
+                if unowned:
+                    self.write_log("%s of sectors outside any file hold data; the game reads "
+                                   "them directly, so they are kept." % cli._human(unowned))
+                cut = fs.truncated()
+                if cut:
+                    self.write_log("WARNING: the image is truncated - %d file(s) extend past "
+                                   "its end (bad dump?). It cannot be processed." % len(cut))
             self.q.put(("call", show))
         self.run_bg(work)
 
@@ -286,6 +311,19 @@ class App(_Tab):
         for i, v in enumerate(self.vids):
             if v.compatible:
                 self.tree.set(str(i), "sel", CHECK if i in self.checked else UNCHECK)
+        self._name_output()
+
+    def _name_output(self, *_):
+        """Keep a default output name in step with the ticks; a chosen name is left alone."""
+        path = self.image_var.get().strip().strip('"')
+        if cli.is_default_output(path, self.out_var.get().strip().strip('"')):
+            self.out_var.set(cli.default_output(path, *self._picked(), self.mode_var.get()))
+
+    def _picked(self):
+        """The ticked rows as (videos, padding items)."""
+        picked = [self.vids[i] for i in sorted(self.checked)]
+        return ([v for v in picked if not isinstance(v, padding.Padding)],
+                [v for v in picked if isinstance(v, padding.Padding)])
 
     def toggle(self, event):
         row = self.tree.identify_row(event.y)
@@ -305,7 +343,13 @@ class App(_Tab):
         self._refresh_checks()
 
     def select_all(self):
-        self.checked = {i for i, v in enumerate(self.vids) if v.compatible}
+        self.checked |= {i for i, v in enumerate(self.vids)
+                         if v.compatible and not isinstance(v, padding.Padding)}
+        self._refresh_checks()
+
+    def select_padding(self):
+        self.checked |= {i for i, v in enumerate(self.vids)
+                         if isinstance(v, padding.Padding) and v.status == padding.SAFE}
         self._refresh_checks()
 
     def select_none(self):
@@ -313,14 +357,22 @@ class App(_Tab):
         self._refresh_checks()
 
     def replace(self):
-        chosen = [self.vids[i] for i in sorted(self.checked)]
-        if not chosen:
-            messagebox.showinfo("PS2VR", "Select at least one compatible video.")
+        chosen, pads = self._picked()
+        if not chosen and not pads:
+            messagebox.showinfo("PS2VR", "Select at least one compatible video or padding item.")
             return
         src = self.image_var.get().strip().strip('"')
+        if src != self._analyzed:
+            messagebox.showwarning("PS2VR", "The disc image changed. Click Analyze first.")
+            return
         out = self.out_var.get().strip().strip('"')
         if not out:
             messagebox.showwarning("PS2VR", "Choose an output file.")
+            return
+        try:
+            rebuild.check_output(src, out)
+        except (rebuild.RebuildError, OSError) as e:
+            messagebox.showerror("PS2VR", str(e))
             return
         if os.path.exists(out) and not messagebox.askyesno("PS2VR", "%s exists. Overwrite?" % out):
             return
@@ -336,7 +388,7 @@ class App(_Tab):
         def work():
             with cli.DiscImage(src) as img:
                 before = os.path.getsize(img.data_path)
-            cli.run_replace(src, out, chosen, dur, mode, verify, log=log, progress=prog)
+            cli.run_replace(src, out, chosen, dur, mode, verify, log=log, progress=prog, pads=pads)
             after = os.path.getsize(out)
             log("Done. %s -> %s (saved %s)" % (cli._human(before), cli._human(after),
                                                cli._human(before - after)))
@@ -361,6 +413,8 @@ class BatchTab(_Tab):
         self.cancel_flag = threading.Event()
         self.folder_var = tk.StringVar(value=st["batch_folder"])
         self.recursive_var = tk.BooleanVar(value=st["batch_recursive"])
+        self.padding_var = tk.BooleanVar(value=st["batch_padding"])
+        self.padding_only_var = tk.BooleanVar(value=st["batch_padding_only"])
         self.outdir_var = tk.StringVar(value=st["batch_output_dir"])
         self.overwrite_var = tk.BooleanVar(value=st["batch_overwrite"])
         self.info_var = tk.StringVar(value="Choose a folder containing PS2 disc images.")
@@ -378,6 +432,13 @@ class BatchTab(_Tab):
         top = ttk.Frame(self)
         top.grid(row=1, column=0, columnspan=4, sticky="ew", pady=(6, 2))
         ttk.Checkbutton(top, text="Include subfolders", variable=self.recursive_var).pack(side="left")
+        padding_check = ttk.Checkbutton(top, text="Also remove blank padding (rebuild mode)",
+                                        variable=self.padding_var, command=self._padding_changed)
+        padding_check.pack(side="left", padx=(10, 0))
+        padding_only_check = ttk.Checkbutton(top, text="Padding only (keep videos)",
+                                             variable=self.padding_only_var,
+                                             command=self._padding_only_changed)
+        padding_only_check.pack(side="left", padx=(10, 0))
         ttk.Label(top, textvariable=self.info_var, foreground="#444").pack(side="left", padx=15)
 
         sel = ttk.Frame(self)
@@ -411,14 +472,15 @@ class BatchTab(_Tab):
         self.cancel_btn = ttk.Button(out, text="Cancel", command=self.cancel_flag.set)
         self.cancel_btn.grid(row=0, column=5, padx=(5, 0))
         self.cancel_btn.state(["disabled"])
-        ttk.Label(out, text="(leave empty to save next to each image as '<name> [PS2VR].iso')",
+        ttk.Label(out, text="(leave empty to save next to each image as '<name> [PS2VR-VP].iso': V videos, P padding)",
                   foreground="#666").grid(row=1, column=1, columnspan=4, sticky="w", padx=5)
 
         self.make_log(6)
         col, _, order = st["batch_sort"].partition(":")
         if col in self._headings:
             self.sort_by(col, order == "desc")
-        self.buttons = [self.scan_btn, self.rescan_btn, self.go_btn, self.all_btn, self.none_btn]
+        self.buttons = [self.scan_btn, self.rescan_btn, self.go_btn, self.all_btn, self.none_btn,
+                        padding_check, padding_only_check]
         if st["batch_folder"] and os.path.isdir(st["batch_folder"]):
             self.after(300, self.scan)   # restore the last folder (instant when cached)
 
@@ -435,10 +497,32 @@ class BatchTab(_Tab):
         st = self.settings
         st["batch_folder"] = self.folder_var.get().strip()
         st["batch_recursive"] = bool(self.recursive_var.get())
+        st["batch_padding"] = bool(self.padding_var.get())
+        st["batch_padding_only"] = bool(self.padding_only_var.get())
         st["batch_output_dir"] = self.outdir_var.get().strip()
         st["batch_overwrite"] = bool(self.overwrite_var.get())
         st["batch_sort"] = "%s:%s" % (self.sort_col, "desc" if self.sort_desc else "asc") \
             if self.sort_col else ""
+
+    def _padding_changed(self):
+        """Padding sizes are always scanned, so this needs no rescan."""
+        if not self.padding_var.get():
+            self.padding_only_var.set(False)
+        use = self.padding_var.get() and self.mode_var.get() == "rebuild"
+        only = self.padding_only_var.get()
+        for i, r in enumerate(self.reports):
+            could = r.can_process
+            r.use_padding, r.padding_only = use, only
+            if r.can_process != could:      # as a scan would select them
+                self.checked ^= {i}
+            self.tree.item(str(i), values=self._row(i, r), tags=() if r.can_process else ("bad",))
+        self.apply_sort()
+        self._summary()
+
+    def _padding_only_changed(self):
+        if self.padding_only_var.get():
+            self.padding_var.set(True)
+        self._padding_changed()
 
     def _options_changed(self, *_):
         if self.reports and not self.busy:
@@ -461,13 +545,11 @@ class BatchTab(_Tab):
             sel, after, saves, vids = NA, "-", "-", "error: " + r.error
         else:
             sel = (CHECK if i in self.checked else UNCHECK) if r.can_process else NA
-            after = cli._human(r.est_size) if r.est_size is not None else "-"
+            after = cli._human(r.after_size) if r.after_size is not None else "-"
             saves = cli._human(r.savings) if r.can_process else "-"
-            vids = "%d of %d replaceable" % (r.target_count, r.video_count)
+            vids = r.contents
             if r.cached:
                 vids += "  (cached)"
-            if r.warning:
-                vids += " (%s)" % r.warning
         return (sel, r.name, cli._human(r.size), after, saves, vids)
 
     def _summary(self):
@@ -484,6 +566,8 @@ class BatchTab(_Tab):
         self.tree.delete(*self.tree.get_children())
         self.reports, self.checked = [], set()
         recursive, dur, mode = self.recursive_var.get(), self.duration(), self.mode_var.get()
+        use_padding = self.padding_var.get() and mode == "rebuild"
+        padding_only = self.padding_only_var.get()
         cache = self.ctx.cache if self.settings["cache_enabled"] else None
         self.store()
         if cache is not None:
@@ -492,6 +576,7 @@ class BatchTab(_Tab):
 
         def work():
             def on_image(n, total, rep):
+                rep.use_padding, rep.padding_only = use_padding, padding_only
                 def add():
                     i = len(self.reports)
                     self.reports.append(rep)
@@ -526,7 +611,7 @@ class BatchTab(_Tab):
         if col == "sel":
             return None if not r.can_process else (0 if int(iid) in self.checked else 1)
         if col == "after":
-            return r.est_size
+            return r.after_size
         if col == "saves":
             return r.savings if r.can_process else None
         if col == "videos":
@@ -564,14 +649,17 @@ class BatchTab(_Tab):
 
     # ----------------------------------------------------------------- run
     def run_batch(self):
+        self._padding_changed()      # the mode may have changed since the scan
         chosen = [self.reports[i] for i in sorted(self.checked)]
         if not chosen:
-            messagebox.showinfo("PS2VR", "Scan a folder and select at least one image.")
+            messagebox.showinfo("PS2VR", "Padding only needs rebuild mode."
+                                if self.padding_only_var.get() and self.mode_var.get() != "rebuild"
+                                else "Scan a folder and select at least one image.")
             return
         out_dir = self.outdir_var.get().strip().strip('"') or None
         if out_dir:
             os.makedirs(out_dir, exist_ok=True)
-        needed = sum(r.est_size or r.size for r in chosen)
+        needed = sum(r.after_size or r.size for r in chosen)
         if not messagebox.askyesno("PS2VR", "Process %d image(s)?\n\nEstimated output: %s\n"
                                    "Estimated savings: %s" % (
                                        len(chosen), cli._human(needed),
@@ -829,7 +917,7 @@ def main(argv=()):
     nb = ttk.Notebook(root)
     nb.pack(fill="both", expand=True)
     image = argv[0] if argv else None
-    tabs = [App(nb, ctx, image), BatchTab(nb, ctx), SettingsTab(nb, ctx)]
+    tabs = [SingleTab(nb, ctx, image), BatchTab(nb, ctx), SettingsTab(nb, ctx)]
     for tab, text in zip(tabs, ("Single image", "Batch (folder)", "Settings")):
         nb.add(tab, text=text)
     if not image and 0 <= settings["last_tab"] < len(tabs):

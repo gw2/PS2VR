@@ -71,6 +71,49 @@ def _classify(head):
     return None
 
 
+def _pack_scr(buf):
+    """SCR of the first MPEG-2 pack header in buf, or None."""
+    k = buf.find(b"\x00\x00\x01\xba")
+    while 0 <= k <= len(buf) - 10:
+        b = buf[k:k + 10]
+        if b[4] >> 6 == 1 and b[4] & 4 and b[6] & 4 and b[8] & 4 and b[9] & 1:
+            return (((b[4] >> 3) & 7) << 30) | ((b[4] & 3) << 28) | (b[5] << 20) | \
+                ((b[6] >> 3) << 15) | ((b[6] & 3) << 13) | (b[7] << 5) | (b[8] >> 3)
+        k = buf.find(b"\x00\x00\x01\xba", k + 1)
+    return None
+
+
+def _slice_codes(buf):
+    n, k = 0, buf.find(b"\x00\x00\x01")
+    while 0 <= k < len(buf) - 3:
+        if 0x01 <= buf[k + 3] <= 0xAF:
+            n += 1
+        k = buf.find(b"\x00\x00\x01", k + 3)
+    return n
+
+
+def continuity(fs, ent, kind, samples=16, window=65536):
+    """Check that the whole file is one video stream, not an archive or a set of
+    concatenated movies that merely starts with one. Returns a reason or None."""
+    last = None
+    for i in range(1, samples):
+        # keep the whole window inside the file, or a sample near the end of a
+        # small file starts inside the last pack and finds no pack header
+        pos = max(0, min(ent.size * i // samples, ent.size - window)) // 2048 * 2048
+        buf = fs.read_file(ent, window, pos)
+        where = "%d%%" % (100 * i // samples)
+        if kind == "MPEG-2 PS":
+            scr = _pack_scr(buf)
+            if scr is None:
+                return "data at %s of the file is not MPEG - an archive that starts with a movie" % where
+            if last is not None and scr < last:
+                return "timestamps restart at %s - several movies in one file" % where
+            last = scr
+        elif _slice_codes(buf) < 4:
+            return "data at %s of the file is not MPEG video - an archive that starts with a movie" % where
+    return None
+
+
 def probe(fs, ent):
     ext = os.path.splitext(ent.name)[1].upper()
     if ent.size < 16:
@@ -122,6 +165,11 @@ def probe(fs, ent):
         v.detail = "CRI Sofdec / MPEG-1 - not yet supported"
     else:
         v.detail = "format not supported"
+    if v.status != UNSUPPORTED:
+        reason = continuity(fs, ent, kind)
+        if reason:
+            v.status, v.detail = UNSUPPORTED, reason
+            log.info("%s rejected: %s", ent.path, reason)
     return v
 
 

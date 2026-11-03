@@ -95,6 +95,7 @@ class SequenceInfo:
     aspect_code: int = 2
     progressive: bool = False
     raw_headers: bytes = b""   # sequence header + extensions copied verbatim
+    pce: dict = None           # picture coding extension flags of the original
 
     @property
     def fps(self):
@@ -145,7 +146,32 @@ def parse_sequence(es: bytes):
     raw = es[i:j]
     if not mpeg2:
         return None
-    return SequenceInfo(width, height, frc, aspect, progressive, raw)
+    return SequenceInfo(width, height, frc, aspect, progressive, raw, _first_pce(es, j))
+
+
+_START = bytes([0, 0, 1])
+_PIC_START = _START + bytes([0])
+
+
+def _first_pce(es, start):
+    """Flags of the first picture coding extension. Some players set up the IPU
+    from the original movie's flags, so the blank must use the same ones."""
+    k = es.find(_PIC_START, start)
+    while k >= 0:
+        k = es.find(_START, k + 4)
+        if k < 0 or len(es) < k + 9:
+            return None
+        if es[k + 3] == 0xB5 and es[k + 4] >> 4 == 8:
+            f = int.from_bytes(es[k + 4:k + 9], "big")   # 40 bits, flags start at bit 20
+            bit = lambda n: (f >> (39 - n)) & 1
+            return {"dcp": (f >> 18) & 3, "tff": bit(24), "fpfd": bit(25), "qst": bit(27),
+                    "ivf": bit(28), "alt": bit(29), "pf": bit(32)}
+        if es[k + 3] <= 0xAF:
+            return None              # reached the slices without an extension
+    return None
+
+
+_PCE_DEFAULT = {"dcp": 0, "tff": 0, "fpfd": 1, "qst": 0, "ivf": 0, "alt": 0, "pf": 1}
 
 
 def _default_headers(info: SequenceInfo):
@@ -178,6 +204,10 @@ def _default_headers(info: SequenceInfo):
 
 
 def _picture(bw, info, temporal_ref, ptype):
+    f = dict(_PCE_DEFAULT, **(info.pce or {}))
+    if info.progressive:
+        f["fpfd"] = f["pf"] = 1      # required for progressive sequences
+    eob = "0110" if f["ivf"] else "10"   # end of block in table B.15 / B.14
     bw.start_code(0x00)
     bw.write(temporal_ref & 0x3FF, 10)
     bw.write(ptype, 3)            # 1 = I, 2 = P
@@ -194,44 +224,49 @@ def _picture(bw, info, temporal_ref, ptype):
     else:
         bw.write(15, 4); bw.write(15, 4)
     bw.write(15, 4); bw.write(15, 4)          # backward f_codes (unused)
-    bw.write(0, 2)                # intra_dc_precision = 8 bit
+    bw.write(f["dcp"], 2)         # intra_dc_precision
     bw.write(3, 2)                # picture_structure = frame
-    bw.write(0, 1)                # top_field_first
-    bw.write(1, 1)                # frame_pred_frame_dct
+    bw.write(f["tff"], 1)         # top_field_first
+    bw.write(f["fpfd"], 1)        # frame_pred_frame_dct
     bw.write(0, 1)                # concealment_motion_vectors
-    bw.write(0, 1)                # q_scale_type
-    bw.write(0, 1)                # intra_vlc_format
-    bw.write(0, 1)                # alternate_scan
+    bw.write(f["qst"], 1)         # q_scale_type
+    bw.write(f["ivf"], 1)         # intra_vlc_format
+    bw.write(f["alt"], 1)         # alternate_scan
     bw.write(0, 1)                # repeat_first_field
-    bw.write(1, 1)                # chroma_420_type (== progressive_frame)
-    bw.write(1, 1)                # progressive_frame
+    bw.write(f["pf"], 1)          # chroma_420_type (== progressive_frame)
+    bw.write(f["pf"], 1)          # progressive_frame
     bw.write(0, 1)                # composite_display_flag
 
+    dc_reset = 1 << (7 + f["dcp"])
+    luma = info_luma(info) << f["dcp"]
     mbw = info.mb_width
     for row in range(info.mb_height):
         bw.start_code(row + 1)    # slice_start_code
         bw.write(8, 5)            # quantiser_scale_code
         bw.write(0, 1)            # extra_bit_slice
         if ptype == 1:
-            pred_y = 128          # DC predictor reset value at slice start
+            pred_y = dc_reset     # DC predictor reset value at slice start
             for _ in range(mbw):
                 _write_mba(bw, 1)
                 bw.bits("1")      # macroblock_type: intra
+                if not f["fpfd"]:
+                    bw.bits("0")  # dct_type: frame DCT
                 for _blk in range(4):
-                    _write_dc(bw, info_luma(info) - pred_y, True)
-                    pred_y = info_luma(info)
-                    bw.bits("10")  # end of block (B.14)
+                    _write_dc(bw, luma - pred_y, True)
+                    pred_y = luma
+                    bw.bits(eob)
                 for _blk in range(2):
                     _write_dc(bw, 0, False)  # Cb/Cr = 128 (neutral)
-                    bw.bits("10")
+                    bw.bits(eob)
         else:
             # first and last macroblock must be coded; all others skipped.
+            mc = "001" + ("" if f["fpfd"] else "10")   # MC not coded (+ frame_motion_type)
             _write_mba(bw, 1)
-            bw.bits("001")        # MC, not coded
+            bw.bits(mc)
             bw.bits("1"); bw.bits("1")   # motion_code 0,0
             if mbw > 1:
                 _write_mba(bw, mbw - 1)
-                bw.bits("001")
+                bw.bits(mc)
                 bw.bits("1"); bw.bits("1")
 
 
