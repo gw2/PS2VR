@@ -82,6 +82,9 @@ class Settings(dict):
         except (OSError, ValueError) as e:
             log.warning("could not read %s (%s); using defaults", self.path, e)
             return
+        if not isinstance(data, dict):
+            log.warning("ignoring %s: not a settings file", self.path)
+            return
         for k, v in data.items():
             if k in DEFAULTS and isinstance(v, type(DEFAULTS[k])) or \
                     (k in DEFAULTS and isinstance(DEFAULTS[k], float) and isinstance(v, int)):
@@ -133,7 +136,6 @@ def setup_logging(settings, level=None, restart=False):
         return None
 
     folder = settings.log_dir
-    os.makedirs(folder, exist_ok=True)
     mode = settings["log_mode"]
     if restart and previous and os.path.normcase(os.path.dirname(previous)) == \
             os.path.normcase(os.path.abspath(folder)):
@@ -148,7 +150,15 @@ def setup_logging(settings, level=None, restart=False):
         path = os.path.join(folder, "ps2vr.log")
         filemode = "a" if mode == "append" else "w"
 
-    _handler = logging.FileHandler(path, mode=filemode, encoding="utf-8")
+    try:
+        os.makedirs(folder, exist_ok=True)
+        _handler = logging.FileHandler(path, mode=filemode, encoding="utf-8")
+    except OSError as e:      # such as a log folder on a missing drive: run without a log
+        log.setLevel(logging.CRITICAL + 1)
+        log.propagate = False
+        if sys.stderr:     # the windowed build has none
+            print("warning: cannot write the log: %s" % e, file=sys.stderr)
+        return None
     _handler.setFormatter(logging.Formatter(
         "%(asctime)s.%(msecs)03d %(levelname)-7s %(name)s: %(message)s", "%Y-%m-%d %H:%M:%S"))
     log.addHandler(_handler)

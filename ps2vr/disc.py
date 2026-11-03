@@ -28,19 +28,29 @@ class ImageError(Exception):
     pass
 
 
+def _read_cue(path):
+    """Return (sheet text, its FILE entries as paths next to the sheet)."""
+    with open(path, "r", errors="replace") as f:
+        text = f.read()
+    folder = os.path.dirname(os.path.abspath(path))
+    names = re.findall(r'^\s*FILE\s+"?(.+?)"?\s+\w+\s*$', text, re.M | re.I)
+    return text, [os.path.join(folder, n) for n in names]
+
+
+def cue_files(path):
+    return _read_cue(path)[1]
+
+
 def _resolve_track_file(path):
     """Return (data_file, hint) for CUE/MDS descriptors, or the path itself."""
     ext = os.path.splitext(path)[1].lower()
-    folder = os.path.dirname(os.path.abspath(path))
     if ext == ".cue":
-        with open(path, "r", errors="replace") as f:
-            text = f.read()
-        files = re.findall(r'^\s*FILE\s+"?(.+?)"?\s+\w+\s*$', text, re.M | re.I)
+        text, files = _read_cue(path)
         if not files:
             raise ImageError("CUE sheet does not reference any FILE")
         m = re.search(r"TRACK\s+\d+\s+(\S+)", text, re.I)
         mode = m.group(1).upper() if m else ""
-        data = os.path.join(folder, files[0])
+        data = files[0]
         if not os.path.exists(data):
             raise ImageError("Track file referenced by CUE not found: %s" % data)
         return data, mode

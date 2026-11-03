@@ -7,8 +7,8 @@ import threading
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
-from . import __version__, cli, batch, config, padding, rebuild
-from .cache import ScanCache
+from . import __version__, cli, batch, config, padding, rebuild, video
+from .cache import ScanCache, WriteOnlyCache
 
 logger = logging.getLogger("ps2vr.gui")
 
@@ -29,7 +29,7 @@ class Context:
 
     def duration(self):
         try:
-            return max(0.01, float(self.dur_var.get()))
+            return min(video.MAX_DURATION, max(0.01, float(self.dur_var.get())))
         except (tk.TclError, ValueError):
             return 1.0
 
@@ -54,6 +54,7 @@ class _Tab(ttk.Frame):
         self.q = queue.Queue()
         self.busy = False
         self.buttons = []
+        self.cancel_flag = threading.Event()
         self.after(100, self.poll)
 
     def write_log(self, msg):
@@ -79,6 +80,7 @@ class _Tab(ttk.Frame):
     def run_bg(self, fn):
         if self.busy:
             return
+        self.cancel_flag.clear()
         self.busy = True
         for b in self.buttons:
             b.state(["disabled"])
@@ -241,6 +243,8 @@ class SingleTab(_Tab):
             self.out_var.set(p)
 
     def analyze(self):
+        if self.busy:
+            return
         path = self.image_var.get().strip().strip('"')
         if not path or not os.path.exists(path):
             messagebox.showwarning("PS2VR", "Choose an existing disc image first.")
@@ -383,12 +387,18 @@ class SingleTab(_Tab):
             self.q.put(("log", m))
 
         def prog(done, total, *_):
+            if self.cancel_flag.is_set():
+                raise batch.Cancelled()
             self.q.put(("progress", done / max(1, total)))
 
         def work():
             with cli.DiscImage(src) as img:
                 before = os.path.getsize(img.data_path)
-            cli.run_replace(src, out, chosen, dur, mode, verify, log=log, progress=prog, pads=pads)
+            try:
+                cli.run_replace(src, out, chosen, dur, mode, verify, log=log, progress=prog, pads=pads)
+            except batch.Cancelled:
+                log("Cancelled - partial output deleted")
+                return
             after = os.path.getsize(out)
             log("Done. %s -> %s (saved %s)" % (cli._human(before), cli._human(after),
                                                cli._human(before - after)))
@@ -410,7 +420,6 @@ class BatchTab(_Tab):
         st = self.settings
         self.reports = []
         self.checked = set()
-        self.cancel_flag = threading.Event()
         self.folder_var = tk.StringVar(value=st["batch_folder"])
         self.recursive_var = tk.BooleanVar(value=st["batch_recursive"])
         self.padding_var = tk.BooleanVar(value=st["batch_padding"])
@@ -485,7 +494,6 @@ class BatchTab(_Tab):
             self.after(300, self.scan)   # restore the last folder (instant when cached)
 
     def run_bg(self, fn):
-        self.cancel_flag.clear()
         super().run_bg(fn)
         self.cancel_btn.state(["!disabled"])
 
@@ -559,6 +567,8 @@ class BatchTab(_Tab):
             len(chosen), cli._human(sum(r.savings for r in chosen))))
 
     def scan(self, force=False):
+        if self.busy:
+            return
         folder = self.folder_var.get().strip().strip('"')
         if not folder or not os.path.isdir(folder):
             messagebox.showwarning("PS2VR", "Choose an existing folder first.")
@@ -591,7 +601,7 @@ class BatchTab(_Tab):
             use = None if (force or cache is None) else cache
             if force and cache is not None:
                 # still record fresh results in the cache
-                use = _WriteOnlyCache(cache)
+                use = WriteOnlyCache(cache)
             reps = batch.scan_folder(folder, recursive, dur, mode, on_image=on_image,
                                      cancel=self.cancel_flag.is_set, cache=use)
             msg = "Found %d image(s)." % len(reps) if reps else "No disc images found."
@@ -688,31 +698,6 @@ class BatchTab(_Tab):
             show = messagebox.showinfo if len(good) == len(chosen) else messagebox.showwarning
             self.q.put(("call", lambda: show("PS2VR", "\n".join(lines))))
         self.run_bg(work)
-
-
-class _WriteOnlyCache:
-    """Cache wrapper for "Rescan all": never returns hits but stores fresh results."""
-
-    def __init__(self, cache):
-        self.cache = cache
-
-    def get(self, *a):
-        self.cache.misses += 1
-        return None
-
-    def put(self, *a):
-        self.cache.put(*a)
-
-    def save(self):
-        self.cache.save()
-
-    @property
-    def hits(self):
-        return self.cache.hits
-
-    @property
-    def misses(self):
-        return self.cache.misses
 
 
 class SettingsTab(ttk.Frame):
@@ -907,7 +892,10 @@ def main(argv=()):
     config.setup_logging(settings)
     root = tk.Tk()
     root.title("PS2VR - PlayStation 2 Video Replacer %s" % __version__)
-    root.geometry(settings["window_geometry"])
+    try:
+        root.geometry(settings["window_geometry"])
+    except tk.TclError:
+        root.geometry(config.DEFAULTS["window_geometry"])
     root.minsize(760, 520)
     try:
         ttk.Style().theme_use("vista")
@@ -932,7 +920,19 @@ def main(argv=()):
             settings["window_geometry"] = root.geometry()
     nb.bind("<<StoreAll>>", store_all)
 
+    closing = []
+
     def on_close():
+        # a job still running would die mid-write and leave its .part file behind
+        running = [t for t in tabs[:2] if t.busy]
+        if running:
+            if not closing and not messagebox.askyesno("PS2VR", "A job is still running. Stop it and close?"):
+                return
+            closing.append(True)
+            for t in running:
+                t.cancel_flag.set()
+            root.after(200, on_close)
+            return
         store_all()
         settings.save()
         ctx.cache.save()

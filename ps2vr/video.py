@@ -12,6 +12,8 @@ VIDEO_EXTS = {".PSS", ".IPU", ".BIK", ".BK2", ".SFD", ".MPG", ".MPEG", ".M2V",
 
 log = logging.getLogger("ps2vr.video")
 
+MAX_DURATION = 600      # seconds; blanks are built in memory
+
 COMPATIBLE = "compatible"
 EXPERIMENTAL = "experimental"
 UNSUPPORTED = "unsupported"
