@@ -5,7 +5,7 @@
 ### New
 - **Padding removal.** `--padding` removes blank padding as well as videos, and `--padding-only` (GUI: **Padding only (keep videos)**) keeps every video. `--padding-suspect` also removes files that only look like padding. `analyze`, the single-image list and the batch scan all report padding. It is off by default.
 - **Sector number warning.** PS2VR warns when removing padding would move files whose sector numbers appear to be stored in a small root file or an `.ELF`. Such games usually break in rebuild mode, and verification cannot detect it. It only warns; the job still runs.
-- **Compatibility list.** `ps2vr/compat.csv` lists 12,835 games by serial, with boot test results for those tested so far. PS2VR reads the serial from the disc, shows the game and its results in `analyze`, the scan and the GUI, and warns when a job matches a recorded failure. `tools/update_game_list.py` refreshes the games and keeps the results.
+- **Compatibility list.** `ps2vr/compat.csv` lists 12,835 games by serial, with boot test results for those tested so far. PS2VR reads the serial from the disc, shows the game and its results in `analyze`, the scan and the GUI, and warns when a job matches a recorded failure.
 - **Output names show what was removed:** `[PS2VR-V]` videos, `[PS2VR-P]` padding, `[PS2VR-VP]` both, with `S` added for suspect padding. Scans also skip the plain `[PS2VR]` of older versions.
 - **Batch options** in the GUI and command line now cover padding and padding only. The batch After and Saves columns update when these are ticked.
 

@@ -180,7 +180,7 @@ DVD games shrunk to 364 MiB still came up as DVDs, and PS2VR warns about the few
 [`ps2vr/compat.csv`](ps2vr/compat.csv) lists PS2 games by serial, with
 any results recorded for it. PS2VR reads the serial from the disc's `SYSTEM.CNF`, then shows the game and its
 results in `analyze` and the GUI, and warns when a job matches a recorded failure. It never
-blocks a job. `python tools/update_game_list.py` refreshes the games and keeps the results.
+blocks a job.
 
 Each result is `ok`, `broken` or `unclear`, with the test date:
 

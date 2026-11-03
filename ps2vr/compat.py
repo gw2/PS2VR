@@ -1,7 +1,6 @@
 """Known test results for PS2 games, looked up by the serial in SYSTEM.CNF.
 
-compat.csv holds every game in PCSX2's game list (tools/update_game_list.py refreshes
-it). Most rows have no results. A result is "ok", "broken" or "unclear" plus the test
+compat.csv lists PS2 games by serial. Most rows have no results. A result is "ok", "broken" or "unclear" plus the test
 date, and only means what the test saw: a boot to the intro or menu in PCSX2.
 """
 
