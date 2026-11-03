@@ -6,6 +6,9 @@ command line. Pure Python 3 standard library – no ffmpeg or other tools needed
 
 See [CHANGELOG.md](CHANGELOG.md) for what changed in each version.
 
+**Tested a game? [Add your result to the compatibility list.](https://github.com/gw2/PS2VR/issues/new?template=game-report.yml)**
+It takes a minute, and failures help as much as successes.
+
 ## Download (Windows)
 
 Get `PS2VR-<version>-windows-x64.zip` from the [Releases](https://github.com/gw2/PS2VR/releases)
@@ -198,6 +201,23 @@ predate later fixes to blank videos.
 Latest video test, rebuild mode, 155 games: 111 ok, 14 broken, 30 unclear. Nine of the broken games also stay on a
 black screen in in-place mode while their originals boot, so blank videos are the likely cause there:
 .hack Parts 1–4, ATV Offroad Fury, Paris-Dakar Rally, The Simpsons: Road Rage, Twisted Metal: Black and War of the Monsters.
+
+### Add your results
+
+Most games are untested, so your report really helps, above all from real PS2 hardware or after
+playing for a while or to the end. A game that breaks is just as useful to know about as one that works.
+
+1. Process a game with PS2VR and test the output.
+2. If it misbehaves, check that the original image works there too.
+3. [Fill in the game report form](https://github.com/gw2/PS2VR/issues/new?template=game-report.yml). You need
+   a GitHub account. **Report a test result...** on the single-image tab and the `Report` line in `analyze` open
+   or show the form with the game already filled in.
+
+PS2VR sends nothing by itself. A report is only what you type into the form, and it is public. Please do
+not attach or link to game images or BIOS files.
+
+Reports are reviewed by hand and added to the `note` column, marked as reported, with what was tested and how far:
+`played to completion on PS2 slim (reported, 2026-11-10)`.
 
 ## Verification done so far (GTA III USA, SLUS-20062)
 

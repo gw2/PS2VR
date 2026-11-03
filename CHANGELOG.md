@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.2 – 2026-11-03
+
+### New
+- **Game reports.** A GitHub form collects test results for the compatibility list. `analyze`, `replace`, `batch` and the GUI link to it, with the game filled in when known, and the single-image tab has a **Report a test result...** button. PS2VR sends nothing by itself.
+
 ## 0.2.1 – 2026-11-03
 
 ### Security

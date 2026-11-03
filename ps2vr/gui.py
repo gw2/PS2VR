@@ -5,9 +5,10 @@ import os
 import queue
 import threading
 import tkinter as tk
+import webbrowser
 from tkinter import ttk, filedialog, messagebox
 
-from . import __version__, cli, batch, config, padding, rebuild, video
+from . import __version__, cli, batch, compat, config, padding, rebuild, video
 from .cache import ScanCache, WriteOnlyCache
 
 logger = logging.getLogger("ps2vr.gui")
@@ -187,6 +188,7 @@ class SingleTab(_Tab):
         self.out_var = tk.StringVar(value="" if image else self.settings["single_output"])
         self._out_for = None if image else remembered   # image the output path belongs to
         self._analyzed = None                           # image self.vids belongs to
+        self._game = None                               # its compatibility list entry
         self.info_var = tk.StringVar(value="Open a PS2 disc image (ISO, BIN/CUE, MDF/MDS).")
         self.mode_var.trace_add("write", self._name_output)
 
@@ -204,6 +206,7 @@ class SingleTab(_Tab):
         ttk.Button(sel, text="Select all compatible", command=self.select_all).pack(side="left")
         ttk.Button(sel, text="Select none", command=self.select_none).pack(side="left", padx=5)
         ttk.Button(sel, text="Select blank padding", command=self.select_padding).pack(side="left")
+        ttk.Button(sel, text="Report a test result...", command=self.report).pack(side="left", padx=(20, 0))
 
         self.tree = self.make_tree(3, (
             ("sel", "", 32, "center", False), ("file", "File", 260, "w", True),
@@ -262,6 +265,7 @@ class SingleTab(_Tab):
             def show():
                 self.vids = vids + pads     # padding is listed but only removed when ticked
                 self._analyzed = path
+                self._game = game
                 self.checked = {i for i, v in enumerate(vids) if v.compatible}
                 self._name_output()
                 for i, v in enumerate(self.vids):
@@ -278,9 +282,8 @@ class SingleTab(_Tab):
                     len(vids), len(ok), cli._human(sum(v.size for v in ok))))
                 if game:
                     self.write_log("Game: %s (%s, %s)" % (game.title, game.serial, game.region))
-                    if game.describe():
-                        self.write_log("Tested in PCSX2, to the intro or menu only: %s"
-                                       % game.describe())
+                    self.write_log("Tested in PCSX2, to the intro or menu only: %s"
+                                   % game.describe() if game.describe() else "Not tested yet.")
                 self.write_log("Found %d video(s); %d compatible." % (len(vids), len(ok)))
                 if pads:
                     self.write_log("Found padding: %s blank, %s suspect. Tick the rows to remove "
@@ -298,6 +301,9 @@ class SingleTab(_Tab):
                                    "its end (bad dump?). It cannot be processed." % len(cut))
             self.q.put(("call", show))
         self.run_bg(work)
+
+    def report(self):
+        webbrowser.open(compat.report_url(self._game))
 
     def sort_key(self, iid, col):
         v = self.vids[int(iid)]
@@ -402,9 +408,11 @@ class SingleTab(_Tab):
             after = os.path.getsize(out)
             log("Done. %s -> %s (saved %s)" % (cli._human(before), cli._human(after),
                                                cli._human(before - after)))
+            log("Please test it, then click Report a test result to add it to the compatibility list.")
             self.q.put(("progress", 1.0))
             self.q.put(("call", lambda: messagebox.showinfo(
-                "PS2VR", "Finished.\n\n%s\nSaved %s" % (out, cli._human(before - after)))))
+                "PS2VR", "Finished.\n\n%s\nSaved %s\n\nPlease test it, then click Report a test "
+                         "result to add it to the compatibility list." % (out, cli._human(before - after)))))
         self.run_bg(work)
 
 
@@ -693,6 +701,9 @@ class BatchTab(_Tab):
                 len(good), len(chosen), cli._human(saved))]
             lines += ["%s: %s" % (r.report.name, r.message) for r in results if not r.ok]
             log("Batch finished. " + lines[0])
+            if good:
+                log("Please test them, then add your results to the compatibility list: %s"
+                    % compat.report_url())
             if len(good) == len(chosen):
                 self.q.put(("progress", 1.0))
             show = messagebox.showinfo if len(good) == len(chosen) else messagebox.showwarning
