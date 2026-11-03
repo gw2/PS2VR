@@ -9,6 +9,9 @@ import csv
 import logging
 import os
 import re
+from urllib.parse import urlencode
+
+from . import __version__
 
 log = logging.getLogger("ps2vr.compat")
 
@@ -19,6 +22,7 @@ LABELS = {"videos_rebuild": "replacing videos, rebuild", "videos_inplace": "repl
 
 _BOOT = re.compile(r"BOOT2?\s*=\s*cdrom0?:\\*([^;\r\n ]+)", re.I)
 _SERIAL = re.compile(r"([A-Z]{4})[_-](\d{3})\.(\d{2})")
+REPORT_FORM = "https://github.com/gw2/PS2VR/issues/new?template=game-report.yml"
 _games = None
 
 
@@ -67,6 +71,15 @@ def lookup(serial):
             log.warning("no compatibility list: %s", e)
             _games = {}
     return _games.get(serial)
+
+
+def report_url(game=None):
+    """The game report form on GitHub, filled in as far as we can. Opening it sends nothing."""
+    if game is None:
+        return REPORT_FORM
+    return REPORT_FORM + "&" + urlencode({
+        "title": "Game report: %s (%s)" % (game.title, game.serial), "game": game.title,
+        "serial": game.serial, "region": game.region, "version": __version__})
 
 
 def problems(game, mode, videos, pads):

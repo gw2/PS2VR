@@ -1,0 +1,104 @@
+name: Game test report
+description: Tell us how a game ran after PS2VR processed it, so it can be added to the compatibility list.
+title: "Game report: "
+labels: ["game report"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for testing! Every report helps the next person. A failure is just as useful as a success.
+
+        **Please do not attach or link to game images, BIOS files or anything else copyrighted.** Reports that do will be removed.
+  - type: input
+    id: game
+    attributes:
+      label: Game
+      placeholder: Grand Theft Auto III
+    validations:
+      required: true
+  - type: input
+    id: serial
+    attributes:
+      label: Serial
+      description: "`PS2VR-cli.exe analyze \"Game.iso\"` shows it on the Game line."
+      placeholder: SLUS-20062
+    validations:
+      required: true
+  - type: input
+    id: region
+    attributes:
+      label: Region
+      placeholder: NTSC-U
+  - type: input
+    id: version
+    attributes:
+      label: PS2VR version
+      placeholder: 0.2.1
+    validations:
+      required: true
+  - type: dropdown
+    id: removed
+    attributes:
+      label: What did you remove?
+      multiple: true
+      options:
+        - Videos
+        - Blank padding
+        - Suspect padding
+    validations:
+      required: true
+  - type: dropdown
+    id: mode
+    attributes:
+      label: Mode
+      options:
+        - Rebuild
+        - In-place
+    validations:
+      required: true
+  - type: dropdown
+    id: result
+    attributes:
+      label: Result
+      options:
+        - "ok: works as far as I tested"
+        - "broken: hangs, crashes or fails where the original does not"
+        - "unclear: I could not tell"
+    validations:
+      required: true
+  - type: input
+    id: tested-on
+    attributes:
+      label: Tested on
+      description: Reports from real PS2 hardware are especially welcome, because they are the hardest to test.
+      placeholder: PCSX2 2.5, or PS2 slim with OPL over network
+    validations:
+      required: true
+  - type: dropdown
+    id: how-far
+    attributes:
+      label: How far did you get?
+      options:
+        - Did not boot
+        - Intro or title screen
+        - Menu
+        - Started playing
+        - Played a good while
+        - Played to completion
+    validations:
+      required: true
+  - type: dropdown
+    id: original
+    attributes:
+      label: Does the original, unprocessed image work there?
+      options:
+        - "Yes"
+        - "No"
+        - Did not check
+    validations:
+      required: true
+  - type: textarea
+    id: notes
+    attributes:
+      label: Notes
+      description: What happened, where it stopped, and any error messages.

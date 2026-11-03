@@ -52,6 +52,7 @@ def cmd_analyze(a):
             "udf": fs.udf is not None, "files": len(fs.files),
             "game": game and {"serial": game.serial, "title": game.title, "region": game.region,
                               "tested": game.describe()},
+            "report_url": compat.report_url(game),
             "videos": [{
                 "path": v.path, "format": v.fmt, "status": v.status,
                 "detail": v.detail, "size": v.size, "lba": v.lba,
@@ -73,6 +74,9 @@ def cmd_analyze(a):
         if game.describe():
             print("Tested  : %s" % game.describe())
             print("          (boot to the intro or menu in PCSX2, not gameplay)")
+        else:
+            print("Tested  : not yet")
+    print("Report  : tested it? Add your result to the list: %s" % compat.report_url(game))
     cut = fs.truncated()
     if cut:
         print("WARNING : image is truncated - %d file(s) extend past the end (bad dump?); "
@@ -224,7 +228,7 @@ def run_replace(image, out, vids, duration=1.0, mode="rebuild", verify=True,
 def cmd_replace(a):
     if a.output:
         rebuild.check_output(a.image, a.output)
-    desc, fs, vids, pads, *_ = analyze(a.image)
+    desc, fs, vids, pads, *_, game = analyze(a.image)
     chosen = select(vids, a.videos, a.all)
     pads = padding.choose(pads, a.padding_suspect) if a.padding or a.padding_suspect else []
     if not chosen and not pads:
@@ -236,6 +240,7 @@ def cmd_replace(a):
                 a.full_verify, progress=_bar("Writing"), pads=pads)
     after = os.path.getsize(out)
     print("Size: %s -> %s (saved %s)" % (_human(before), _human(after), _human(before - after)))
+    print("Please test it, then add your result to the list: %s" % compat.report_url(game))
     return 0
 
 
@@ -307,6 +312,8 @@ def cmd_batch(a):
     for r in results:
         if not r.ok:
             print("  %s: %s" % (r.report.name, r.message))
+    if good:
+        print("Please test them, then add your results to the list: %s" % compat.report_url())
     return 0 if len(good) == len(chosen) else 3
 
 
